@@ -70,6 +70,12 @@ type Startup (env:IHostingEnvironment) =
                                                 if h.Span.EndsWith(t1.Span) && next.Span.StartsWith(t2.Span) then
                                                     do! write dest
                                                     do! next.Slice(t2.Length) |> forward
+                                                else 
+                                                    do! write current
+                                                    do! forward next
+                                            else 
+                                                do! write current
+                                                do! forward next
                                     else 
                                         if pos > 0 then do! current.Slice(0, pos) |> write
                                         do! write dest
@@ -89,11 +95,10 @@ type Startup (env:IHostingEnvironment) =
                 use streamResponse = new System.IO.StreamReader(response.GetResponseStream())
                 use outStream = new System.IO.StreamWriter(httpContext.Response.Body)
 
-                let target = MemoryExtensions.AsMemory "Domain"
-                let dest = MemoryExtensions.AsMemory "Fuuuck"
+                let target = MemoryExtensions.AsMemory "this domain in examples without prior coordination or asking for permission"
+                let dest   = MemoryExtensions.AsMemory "this fuuuck in examples without prior coordination or asking for permission"
 
-                do! streamResponse |> forward 2048 target dest outStream
-
+                do! streamResponse |> forward 16 target dest outStream
 
             } |> Async.StartAsTask :> System.Threading.Tasks.Task
         )
