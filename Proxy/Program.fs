@@ -9,6 +9,19 @@ open System.Net
 open Microsoft.AspNetCore.Http.Extensions
 open System
 
+module Async = 
+    let inline bind f x = async.Bind(x, f)
+    let inline map f x = bind (f >> async.Return) x
+    let inline apply f x = bind (fun f' -> map f' x) f
+    let inline ret x = async.Return x
+
+    module Operators = 
+        let inline (<!>) f x = map f x
+        let inline (>>=) f x = bind x f
+        let inline (<*>) f x = apply f x
+
+open Async.Operators
+
 type Startup (env:IHostingEnvironment) = 
     member val public Configuration = (new ConfigurationBuilder()).AddEnvironmentVariables().Build() with get, set
 
@@ -17,49 +30,73 @@ type Startup (env:IHostingEnvironment) =
 
         app.Run(fun httpContext -> 
             async {
-                use b = System.Buffers.MemoryPool.Shared.Rent 4096
-                
-                let forward () = 
+                let forward size (target:ReadOnlyMemory<char>) (dest:ReadOnlyMemory<char>) (output:IO.StreamWriter) (input:IO.StreamReader) = 
                     async {
-                        let uri = UriHelper.GetEncodedUrl(httpContext.Request)
-                        let req = HttpWebRequest.CreateHttp uri
-                        
-                        req.AllowReadStreamBuffering <- false
-                        req.AllowWriteStreamBuffering <- false
+                        use b1 = Buffers.MemoryPool.Shared.Rent size
+                        use b2 = Buffers.MemoryPool.Shared.Rent size
 
-                        let! response = req.GetResponseAsync() |> Async.AwaitTask
-                        use streamResponse = new System.IO.StreamReader(response.GetResponseStream())
-                        use outStream = new System.IO.StreamWriter(httpContext.Response.Body)
-                        let rom = System.Memory.op_Implicit b.Memory
+                        let read m = 
+                            input.ReadBlockAsync(m, httpContext.RequestAborted).AsTask() 
+                            |> Async.AwaitTask
+                            |> Async.map (fun reads -> m.Slice(0, reads) |> Memory.op_Implicit)
                         
-                        let target = System.MemoryExtensions.AsMemory "Domain"
-                        let dest   = System.MemoryExtensions.AsMemory "Fuuuck"
+                        let write m = output.WriteAsync(m, httpContext.RequestAborted) |> Async.AwaitTask
                         
-                        let replace copy (rom:ReadOnlyMemory<_>) = 
-                            let rec replace (rom:ReadOnlyMemory<_>) = 
-                                async {
-                                    let idx = System.MemoryExtensions.IndexOf(rom.Span, target.Span, System.StringComparison.InvariantCultureIgnoreCase)                                    
-                                    if idx = -1 then do! copy rom //Maybe I need to 
-                                    else
-                                        if idx > 0 then do! copy (rom.Slice(0, idx))
-                                        do! copy dest
-                                        
-                                        do! replace (rom.Slice(idx + dest.Length))
-                                }
-                            replace rom
-                        let copy (rom:ReadOnlyMemory<_>) = outStream.WriteAsync(rom) |> Async.AwaitTask
-                        let rec sync () = 
+                        let t1 = target.Slice(0,1)
+
+                        let rec forward m1 m2 (current:ReadOnlyMemory<char>) = 
                             async {
-                                let! r = streamResponse.ReadBlockAsync(b.Memory).AsTask() |> Async.AwaitTask
-                                if r > 0 then
-                                    //do! outStream.WriteAsync(rom.Slice(0,r)) |> Async.AwaitTask
-                                    do! rom.Slice(0, r) |> replace copy
-                                    do! sync () }
-                        do! sync ()
+                                let forward = forward m2 m1
+                                let read () = read m1
+                                
+                                if current.Length = 0 then
+                                    let! next = read () 
+                                    if next.Length > 0 then do! forward next
+                                else
+                                    let pos = current.Span.IndexOf(target.Span)
+                                    if pos < 0 then 
+                                        let pos1 = current.Span.LastIndexOf(t1.Span)
+                                        let! next = read ()
+                                        
+                                        if next.Length = 0 then do! write current
+                                        elif pos1 < 0 then 
+                                            do! write current
+                                            do! forward next
+                                        else 
+                                            let h = current.Slice(pos1)
+                                            if h.Length < target.Length then
+                                                let t1 = target.Slice(0, h.Length)
+                                                let t2 = target.Slice(h.Length)
+                                                if h.Span.EndsWith(t1.Span) && next.Span.StartsWith(t2.Span) then
+                                                    do! write dest
+                                                    do! next.Slice(t2.Length) |> forward
+                                    else 
+                                        if pos > 0 then do! current.Slice(0, pos) |> write
+                                        do! write dest
+                                        do! current.Slice (pos + target.Length) |> write
+                            }
+                        
+                        do! forward b1.Memory b2.Memory ReadOnlyMemory.Empty
                     }
 
-                do! forward ()
-            } |> Async.StartAsTask :> System.Threading.Tasks.Task)
+                let uri = UriHelper.GetEncodedUrl(httpContext.Request)
+                let req = HttpWebRequest.CreateHttp uri
+                
+                req.AllowReadStreamBuffering <- false
+                req.AllowWriteStreamBuffering <- false
+
+                let! response = req.GetResponseAsync() |> Async.AwaitTask
+                use streamResponse = new System.IO.StreamReader(response.GetResponseStream())
+                use outStream = new System.IO.StreamWriter(httpContext.Response.Body)
+
+                let target = MemoryExtensions.AsMemory "Domain"
+                let dest = MemoryExtensions.AsMemory "Fuuuck"
+
+                do! streamResponse |> forward 2048 target dest outStream
+
+
+            } |> Async.StartAsTask :> System.Threading.Tasks.Task
+        )
 
 [<EntryPoint>]
 let main argv =

@@ -5,4 +5,4 @@ let r =
     use reader = new System.IO.StreamReader(r.GetResponse().GetResponseStream())
     reader.ReadToEnd()
 
-printfn "%s" r
+r.Length = 1270
