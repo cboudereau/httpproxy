@@ -148,7 +148,7 @@ type Startup (env:IHostingEnvironment) =
                                                 let t1 = target.Slice(0, h.Length)
                                                 let t2 = target.Slice(h.Length)
                                                 if h.Span.EndsWith(t1.Span) && next.Span.StartsWith(t2.Span) then
-                                                    do! current.Slice(0, pos1) |> write
+                                                    if pos1 > 0 then do! current.Slice(0, pos1) |> write
                                                     do! write dest
                                                     do! next.Slice(t2.Length) |> forward
                                                 else 
