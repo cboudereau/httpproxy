@@ -12,3 +12,13 @@ C:\tools\httpd-2.4.34-o102o-x86-vc14\Apache24\bin> .\ab.exe -k -c 100 -t 60 -n 1
 
 = Reverse =
 C:\tools\httpd-2.4.34-o102o-x86-vc14\Apache24\bin> .\ab.exe -k -H "Accept-Encoding: gzip" -c 1 -t 60 -n 1 -p C:\tools\StaticSite\netcoreapp2.1\120K.xml -T application/xml -X localhost:5000 http://localhost:8081/120K.xml
+
+
+261rps
+.\ab.exe -k -H "Accept-Encoding: gzip" -H "Content-Encoding: gzip" -c 1000 -t 60 -n 1000000 -p C:\tools\StaticSite\netcoreapp2.1\240K.xml.gz -T application/xml -X localhost:5000 http://localhost:8081/120K.xml
+
+252rps
+.\ab.exe -k -H "Accept-Encoding: gzip" -c 1000 -t 60 -n 1000000 -p C:\tools\StaticSite\netcoreapp2.1\240K.xml -T application/xml -X localhost:5000 http://localhost:8081/120K.xml
+
+192rps
+.\ab.exe -k -c 1000 -t 60 -n 1000000 -p C:\tools\StaticSite\netcoreapp2.1\240K.xml -T application/xml -X localhost:5000 http://localhost:8081/120K.xml

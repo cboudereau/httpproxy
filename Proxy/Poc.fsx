@@ -8,7 +8,7 @@ let compress source =
         new System.IO.Compression.GZipStream(t, System.IO.Compression.CompressionMode.Compress, false)
     sourceStream.CopyTo(target)
 
-//compress """C:\tools\StaticSite\netcoreapp2.1\120K.xml"""
+//compress """C:\tools\StaticSite\netcoreapp2.1\240K.xml"""
 
 let gzipRequestResponse = 
     let response = 
@@ -19,7 +19,7 @@ let gzipRequestResponse =
 
         r.Method <- "POST"
         use body = new System.IO.Compression.GZipStream(r.GetRequestStream(), System.IO.Compression.CompressionMode.Compress, true)
-        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\30K.xml""")
+        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\240K.xml""")
         source.CopyTo(body)
         body.Dispose()
 
@@ -34,7 +34,7 @@ let gzipResponseOnly =
 
         r.Method <- "POST"
         use body = r.GetRequestStream()
-        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\30K.xml""")
+        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\240K.xml""")
         source.CopyTo(body)
         body.Dispose()
         let response = r.GetResponse()
@@ -47,7 +47,7 @@ let noCompression =
         let r = WebRequest.CreateHttp("http://192.168.2.241:8081/api/hello", Proxy = WebProxy("http://192.168.2.241:5000", false))
         r.Method <- "POST"
         use body = r.GetRequestStream()
-        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\30K.xml""")
+        use source = System.IO.File.OpenRead("""C:\tools\StaticSite\netcoreapp2.1\240K.xml""")
         source.CopyTo(body)
         body.Dispose()
         let response = r.GetResponse()
