@@ -9,6 +9,12 @@ open System.Net
 open Microsoft.AspNetCore.Http.Extensions
 open System
 
+//https://docs.oracle.com/cd/E23095_01/Search.93/ATGSearchAdmin/html/s1207adjustingtcpsettingsforheavyload01.html
+//"System.Net.WebException": Only one usage of each socket address (protocol/network address/port) is normally permitted
+//System.Net.ServicePointManager.DefaultConnectionLimit <- 50
+
+//let httpClient = new System.Net.Http.HttpClient()
+
 module Seq = 
     let inline add x source = seq { yield! source; yield x }
 
@@ -108,7 +114,43 @@ module Proxy =
             do! run b1.Memory b2.Memory 0 List.empty
         }
 
-type Startup (env:IHostingEnvironment) = 
+type Static (env:IHostingEnvironment) = 
+    member public __.Configure(app:IApplicationBuilder, loggerFactory:ILoggerFactory) = 
+        //loggerFactory.AddConsole() |> ignore
+        app.UseStaticFiles().UseDirectoryBrowser().UseDefaultFiles().UseFileServer()
+        |> ignore
+
+type Identity (env:IHostingEnvironment) = 
+    member public __.Configure(app:IApplicationBuilder, loggerFactory:ILoggerFactory) = 
+        loggerFactory.AddConsole() |> ignore
+        app.Run(fun httpContext -> 
+            async {
+                httpContext.Response.ContentType <- httpContext.Request.ContentType
+                if httpContext.Request.Headers.ContainsKey("Accept-Encoding") 
+                    && httpContext.Request.Headers.["Accept-Encoding"].Item 0 = "gzip" then
+                    httpContext.Response.Headers.Add("Content-Encoding", Microsoft.Extensions.Primitives.StringValues("gzip"))
+                    if httpContext.Request.Headers.ContainsKey("Content-Encoding") |> not then
+                        use ms = new System.IO.MemoryStream()
+
+                        let output = 
+                            new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Compress, true)
+                            :> System.IO.Stream
+
+                        do! httpContext.Request.Body.CopyToAsync(output) |> Async.AwaitTask
+                        output.Dispose()
+                        httpContext.Response.ContentLength <- Nullable(ms.Length)
+                        ms.Position <- 0L
+                        do! ms.CopyToAsync(httpContext.Response.Body) |> Async.AwaitTask
+                    else
+                        httpContext.Response.ContentLength <- httpContext.Request.ContentLength
+                        do! httpContext.Request.Body.CopyToAsync(httpContext.Response.Body) |> Async.AwaitTask
+                else 
+                    httpContext.Response.ContentLength <- httpContext.Request.ContentLength
+                    do! httpContext.Request.Body.CopyToAsync(httpContext.Response.Body) |> Async.AwaitTask
+            } |> Async.StartAsTask :> System.Threading.Tasks.Task)
+        |> ignore
+
+type Forward (env:IHostingEnvironment) = 
     member val public Configuration = (new ConfigurationBuilder()).AddEnvironmentVariables().Build() with get, set
 
     member public __.Configure(app:IApplicationBuilder, loggerFactory:ILoggerFactory) = 
@@ -116,68 +158,35 @@ type Startup (env:IHostingEnvironment) =
 
         app.Run(fun httpContext -> 
             async {
-                let forward size (target:ReadOnlyMemory<char>) (dest:ReadOnlyMemory<char>) (output:IO.StreamWriter) (input:IO.StreamReader) = 
-                    async {
-                        use b1 = Buffers.MemoryPool.Shared.Rent size
-                        use b2 = Buffers.MemoryPool.Shared.Rent size
-
-                        let read m = 
-                            input.ReadBlockAsync(m, httpContext.RequestAborted).AsTask() 
-                            |> Async.AwaitTask
-                            |> Async.map (fun reads -> m.Slice(0, reads) |> Memory.op_Implicit)
-                        
-                        let write m = output.WriteAsync(m, httpContext.RequestAborted) |> Async.AwaitTask
-                        
-                        let t1 = target.Slice(0,1)
-
-                        let rec forward m1 m2 (current:ReadOnlyMemory<char>) = 
-                            async {
-                                if current.Length = 0 then
-                                    let! next = read m1 
-                                    if next.Length > 0 then do! forward m1 m2 next
-                                else
-                                    let pos = current.Span.IndexOf(target.Span)
-                                    if pos < 0 then 
-                                        let pos1 = current.Span.LastIndexOf(t1.Span)
-                                        let! next = read m2
-                                        
-                                        if next.Length = 0 then do! write current
-                                        elif pos1 < 0 then 
-                                            do! write current
-                                            do! forward m2 m1 next
-                                        else 
-                                            if current.Length - pos1 < target.Length then
-                                                let h = current.Slice(pos1)
-                                                let t1 = target.Slice(0, h.Length)
-                                                let t2 = target.Slice(h.Length)
-                                                if h.Span.EndsWith(t1.Span) && next.Span.StartsWith(t2.Span) then
-                                                    if pos1 > 0 then do! current.Slice(0, pos1) |> write
-                                                    do! write dest
-                                                    do! next.Slice(t2.Length) |> forward m2 m1
-                                                else 
-                                                    do! write current
-                                                    do! forward m2 m1 next
-                                            else 
-                                                do! write current
-                                                do! forward m2 m1 next
-                                    else 
-                                        if pos > 0 then do! current.Slice(0, pos) |> write
-                                        do! write dest
-                                        do! current.Slice (pos + target.Length) |> forward m1 m2
-                            }
-                        
-                        do! forward b1.Memory b2.Memory ReadOnlyMemory.Empty
-                    }
-
                 let uri = UriHelper.GetEncodedUrl(httpContext.Request)
+
                 let req = HttpWebRequest.CreateHttp uri
                 
                 req.AllowReadStreamBuffering <- false
                 req.AllowWriteStreamBuffering <- false
+                req.AutomaticDecompression <- DecompressionMethods.None
+                req.Method <- httpContext.Request.Method
+                let inputKeys = [ for k in httpContext.Request.Headers.Keys -> k] |> List.filter(fun k -> List.exists ((=)k) ["Host"; "Content-Length";] |> not)
+                
+                inputKeys 
+                |> List.map (fun k -> struct (k, httpContext.Request.Headers.Item k))
+                |> List.iter (fun struct (k,v) -> req.Headers.[k] <- v.Item 0)
 
-                let! response = req.GetResponseAsync() |> Async.AwaitTask
-                use streamResponse = new System.IO.StreamReader(response.GetResponseStream())
-                use outStream = new System.IO.StreamWriter(httpContext.Response.Body)
+                use uncompressedInput = 
+                    if httpContext.Request.Headers.ContainsKey("Content-Encoding") && httpContext.Request.Headers.["Content-Encoding"].Item 0 = "gzip" then
+                        new IO.Compression.GZipStream(httpContext.Request.Body, IO.Compression.CompressionMode.Decompress, false) :> IO.Stream
+                    else httpContext.Request.Body
+                
+                use input = new System.IO.StreamReader(uncompressedInput)
+                
+                let! reqStream = req.GetRequestStreamAsync() |> Async.AwaitTask
+                
+                use compressedOuput = 
+                    if httpContext.Request.Headers.ContainsKey("Content-Encoding") && httpContext.Request.Headers.["Content-Encoding"].Item 0 = "gzip" then
+                        new IO.Compression.GZipStream(reqStream, IO.Compression.CompressionMode.Compress, true) :> IO.Stream
+                    else reqStream
+
+                use output = new System.IO.StreamWriter(compressedOuput)
 
                 let replace = 
                     let replace target dest = 
@@ -185,25 +194,41 @@ type Startup (env:IHostingEnvironment) =
                         let d = MemoryExtensions.AsMemory dest
                         NonContiguousMemory.replace t d
 
-                    replace "ve examples in docu" "ve fuucking in docu" >> replace "domain" "fuuuck"
+                    //replace "ve examples in docu" "ve fuucking in docu" >> replace "domain" "fuuuck"
+                    replace "P@ssw0rd" "**********"
+                
+                do! Proxy.run 4096 (fun x -> output.WriteAsync(x) |> Async.AwaitTask) (Proxy.Reader replace) (fun m -> input.ReadBlockAsync(m).AsTask() |> Async.AwaitTask |> Async.map (fun r -> m.Slice(0,r) |> Memory.op_Implicit))
+                
+                output.Dispose()
+                
+                let! webResponse = req.GetResponseAsync() |> Async.AwaitTask
+                
+                use webResponseStream = webResponse.GetResponseStream()
+                
+                let outputKeys = [ for k in webResponse.Headers.Keys -> k ] |> List.filter(fun k -> List.exists ((=)k) ["Host"] |> not)
 
-                //do! streamResponse |> forward 16 target dest outStream
-                do! Proxy.run 16 (fun x -> outStream.WriteAsync(x) |> Async.AwaitTask) (Proxy.Reader replace) (fun m -> streamResponse.ReadBlockAsync(m).AsTask() |> Async.AwaitTask |> Async.map (fun r -> m.Slice(0,r) |> Memory.op_Implicit))
-
+                outputKeys
+                |> List.map (fun k -> struct (k, webResponse.Headers.Get k) )
+                |> List.iter (fun struct (k, v) -> httpContext.Response.Headers.Add(k, Microsoft.Extensions.Primitives.StringValues(v) ) )
+                use responseStream = httpContext.Response.Body
+                httpContext.Response.ContentLength <- Nullable webResponse.ContentLength
+                do! webResponseStream.CopyToAsync(responseStream) |> Async.AwaitTask
             } |> Async.StartAsTask :> System.Threading.Tasks.Task
         )
 
 [<EntryPoint>]
 let main argv =
-    
     let config = (ConfigurationBuilder()).Build()
-
+    
     let builder = 
-        (new WebHostBuilder()).UseConfiguration(config).UseStartup<Startup>()
+        (new WebHostBuilder()).UseConfiguration(config).UseStartup<Forward>()
             .UseKestrel()
-            .UseUrls("http://localhost:5000");
+            //.UseWebRoot(System.IO.Directory.GetCurrentDirectory())
+            //.UseUrls("http://localhost:8080")
+            //.UseUrls("http://localhost:8081", "http://192.168.2.241:8081")
+            .UseUrls("http://localhost:5000", "http://192.168.2.241:5000")
 
-    let host = builder.Build();
-    host.Run();
+    let host = builder.Build()
+    host.Run()
 
     0 // return an integer exit code

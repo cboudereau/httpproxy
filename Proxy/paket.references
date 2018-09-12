@@ -1,3 +1,5 @@
 FSharp.Core
 Microsoft.AspNetCore.Server.Kestrel
 Microsoft.Extensions.Logging.Console
+Microsoft.AspNetCore.StaticFiles
+Microsoft.Extensions.Primitives
